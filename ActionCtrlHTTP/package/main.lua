@@ -4,11 +4,14 @@ local SOURCE_NAME = "ActionCtrlHTTP"
 local CONFIG_PATH = "/sd/data/actionctrlhttp/config.json"
 local ROUTE_TAP = "/remote/api/v1/tap"
 local ROUTE_STATUS = "/remote/api/v1/status"
+local ROUTE_SETTINGS = "/remote/api/v1/settings"
 local BODY_LIMIT = 1024
 local TOKEN_MIN_LENGTH = 32
 local TOKEN_MAX_LENGTH = 256
 local REQUEST_ID_MAX_LENGTH = 64
-local QUEUE_CAPACITY = 16
+local QUEUE_CAPACITY_DEFAULT = 16
+local QUEUE_CAPACITY_MIN = 1
+local QUEUE_CAPACITY_MAX = 32
 local DEDUPE_CAPACITY = 64
 local ENGINE_TICK_MS = 20
 local PRESS_MS = 120
@@ -34,14 +37,16 @@ if previous and type(previous.stop) == "function" then
 end
 
 local APP = {
-  version = "0.1.2",
+  version = "0.2.0",
   routes = {},
   queue = {},
   queue_head = 1,
   queue_tail = 0,
   seen_requests = {},
   seen_order = {},
+  config = {},
   engine_timer = nil,
+  queue_capacity = QUEUE_CAPACITY_DEFAULT,
   owns_source = inherited_source,
   buttons = 0,
   phase = "idle",
@@ -90,11 +95,11 @@ local function response(status, payload)
   }
 end
 
-local function load_token()
+local function read_config(path)
   if not file or type(file.getcontents) ~= "function" or not JSON or type(JSON.decode) ~= "function" then
     return nil, "config_api_unavailable"
   end
-  local read_ok, raw = pcall(file.getcontents, CONFIG_PATH)
+  local read_ok, raw = pcall(file.getcontents, path or CONFIG_PATH)
   if not read_ok or type(raw) ~= "string" or raw == "" then
     return nil, "config_missing"
   end
@@ -106,10 +111,125 @@ local function load_token()
   if type(token) ~= "string" or #token < TOKEN_MIN_LENGTH or #token > TOKEN_MAX_LENGTH then
     return nil, "config_invalid_token"
   end
-  return token
+  return config
 end
 
-APP.token, APP.config_error = load_token()
+local function load_config()
+  local config, err = read_config(CONFIG_PATH)
+  if config then return config end
+  local backup = read_config(CONFIG_PATH .. ".bak")
+  if backup then
+    if file and type(file.rename) == "function" then
+      if type(file.remove) == "function" then pcall(file.remove, CONFIG_PATH) end
+      pcall(file.rename, CONFIG_PATH .. ".bak", CONFIG_PATH)
+    end
+    return backup
+  end
+  return nil, err
+end
+
+local function valid_queue_capacity(value)
+  if type(value) ~= "number" or value ~= math.floor(value)
+      or value < QUEUE_CAPACITY_MIN or value > QUEUE_CAPACITY_MAX then
+    return nil
+  end
+  return value
+end
+
+APP.config, APP.config_error = load_config()
+APP.token = APP.config and APP.config.token or nil
+APP.queue_capacity = valid_queue_capacity(APP.config and APP.config.queue_capacity)
+  or QUEUE_CAPACITY_DEFAULT
+if APP.config and APP.config.queue_capacity ~= nil and not valid_queue_capacity(APP.config.queue_capacity) then
+  log("invalid saved queue_capacity; using default " .. QUEUE_CAPACITY_DEFAULT)
+end
+
+local function path_exists(path)
+  if file and type(file.exists) == "function" then
+    local ok, exists = pcall(file.exists, path)
+    if ok then return exists == true end
+  end
+  if file and type(file.getcontents) == "function" then
+    local ok, contents = pcall(file.getcontents, path)
+    return ok and type(contents) == "string"
+  end
+  return false
+end
+
+local function remove_path(path)
+  if file and type(file.remove) == "function" then pcall(file.remove, path) end
+end
+
+local function restore_config_backup(backup_path)
+  if not path_exists(backup_path) or not file or type(file.rename) ~= "function" then return end
+  if path_exists(CONFIG_PATH) then remove_path(CONFIG_PATH) end
+  pcall(file.rename, backup_path, CONFIG_PATH)
+end
+
+local function write_config_atomic(config)
+  if not file or type(file.putcontents) ~= "function"
+      or type(file.getcontents) ~= "function"
+      or type(file.rename) ~= "function" then
+    return false, "config_write_api_unavailable"
+  end
+  local encoded, encode_error = json_encode(config)
+  if not encoded then return false, encode_error or "config_encode_failed" end
+
+  local temp_path = CONFIG_PATH .. ".tmp"
+  local backup_path = CONFIG_PATH .. ".bak"
+  remove_path(temp_path)
+  local write_ok, write_result = pcall(file.putcontents, temp_path, encoded)
+  if not write_ok or write_result == false or write_result == nil then
+    remove_path(temp_path)
+    return false, "config_temp_write_failed"
+  end
+
+  local read_ok, written = pcall(file.getcontents, temp_path)
+  if not read_ok or written ~= encoded then
+    remove_path(temp_path)
+    return false, "config_temp_verify_failed"
+  end
+  local decode_ok, decoded = pcall(JSON.decode, written)
+  if not decode_ok or type(decoded) ~= "table"
+      or decoded.token ~= config.token
+      or decoded.queue_capacity ~= config.queue_capacity then
+    remove_path(temp_path)
+    return false, "config_temp_invalid"
+  end
+
+  local has_original = path_exists(CONFIG_PATH)
+  if path_exists(backup_path) then
+    remove_path(backup_path)
+    if path_exists(backup_path) then
+      remove_path(temp_path)
+      return false, "config_backup_cleanup_failed"
+    end
+  end
+  if has_original then
+    local backup_ok, backup_result = pcall(file.rename, CONFIG_PATH, backup_path)
+    if not backup_ok or backup_result ~= true then
+      remove_path(temp_path)
+      return false, "config_backup_failed"
+    end
+  end
+
+  local install_ok, install_result = pcall(file.rename, temp_path, CONFIG_PATH)
+  if not install_ok or install_result ~= true then
+    if has_original then restore_config_backup(backup_path) end
+    remove_path(temp_path)
+    return false, "config_commit_failed"
+  end
+
+  local committed = read_config(CONFIG_PATH)
+  if not committed
+      or committed.token ~= config.token
+      or committed.queue_capacity ~= config.queue_capacity then
+    restore_config_backup(backup_path)
+    return false, "config_commit_verify_failed"
+  end
+  if has_original then remove_path(backup_path) end
+  return true
+end
 
 local function constant_time_equal(a, b)
   if type(a) ~= "string" or type(b) ~= "string" or #a ~= #b then
@@ -481,6 +601,7 @@ local function status_handler(req)
     source = SOURCE,
     buttons = APP.buttons,
     queue_length = queue_length(),
+    queue_capacity = APP.queue_capacity,
     phase = APP.phase,
     source_owned = APP.owns_source,
     source_busy = busy,
@@ -525,7 +646,7 @@ local function tap_handler(req)
       duplicate = true,
     })
   end
-  if queue_length() >= QUEUE_CAPACITY then
+  if queue_length() >= APP.queue_capacity then
     return response("429 Too Many Requests", { ok = false, error = "queue_full", request_id = command.request_id })
   end
 
@@ -544,6 +665,54 @@ local function tap_handler(req)
     ok = true,
     request_id = command.request_id,
     queued = true,
+  })
+end
+
+local function settings_handler(req)
+  if APP.stopped then return response("503 Service Unavailable", { ok = false, error = "service_stopped" }) end
+  local authenticated, auth_response = authenticate(req)
+  if not authenticated then return auth_response end
+
+  local body, body_error = read_request_body(req)
+  if not body then
+    local status = body_error == "body_too_large" and "413 Payload Too Large" or "400 Bad Request"
+    return response(status, { ok = false, error = body_error })
+  end
+  if not JSON or type(JSON.decode) ~= "function" then
+    return response("503 Service Unavailable", { ok = false, error = "json_decoder_unavailable" })
+  end
+  local decode_ok, value = pcall(JSON.decode, body)
+  if not decode_ok or type(value) ~= "table" then
+    return response("400 Bad Request", { ok = false, error = "invalid_json" })
+  end
+  local capacity = valid_queue_capacity(value.queue_capacity)
+  if not capacity then
+    return response("400 Bad Request", {
+      ok = false,
+      error = "invalid_queue_capacity",
+      min = QUEUE_CAPACITY_MIN,
+      max = QUEUE_CAPACITY_MAX,
+    })
+  end
+
+  local config = {}
+  for key, item in pairs(APP.config or {}) do config[key] = item end
+  config.token = APP.token
+  config.queue_capacity = capacity
+  local saved, save_error = write_config_atomic(config)
+  if not saved then
+    APP.last_error = save_error
+    return response("500 Internal Server Error", { ok = false, error = "config_write_failed", detail = save_error })
+  end
+
+  APP.config = config
+  APP.queue_capacity = capacity
+  APP.last_error = nil
+  return response("200 OK", {
+    ok = true,
+    queue_capacity = APP.queue_capacity,
+    queue_length = queue_length(),
+    persisted = true,
   })
 end
 
@@ -577,6 +746,11 @@ local function start_http()
   local ok, err = register_route(post_method, ROUTE_TAP, tap_handler)
   if not ok then return false, err end
   ok, err = register_route(get_method, ROUTE_STATUS, status_handler)
+  if not ok then
+    unregister_routes()
+    return false, err
+  end
+  ok, err = register_route(post_method, ROUTE_SETTINGS, settings_handler)
   if not ok then
     unregister_routes()
     return false, err

@@ -1,3 +1,4 @@
 {
-  "token": "replace-with-at-least-32-random-bytes-hex-encoded"
+  "token": "replace-with-at-least-32-random-bytes-hex-encoded",
+  "queue_capacity": 16
 }

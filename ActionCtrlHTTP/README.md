@@ -9,11 +9,12 @@ Copy `package/` to `/sd/apps/ActionCtrlHTTP/`, then rescan apps. The Service
 starts automatically because `app.info` sets `autostart_service = true`.
 
 Create `/sd/data/actionctrlhttp/config.json` on the device with a private token
-of at least 32 characters:
+of at least 32 characters. `queue_capacity` is optional and defaults to 16:
 
 ```json
 {
-  "token": "<private-token>"
+  "token": "<private-token>",
+  "queue_capacity": 16
 }
 ```
 
@@ -31,7 +32,7 @@ token prevents accidental requests, not a determined client on that network.
 
 ## HTTP API
 
-Send `X-ActionCtrl-Token: <private-token>` on both endpoints.
+Send `X-ActionCtrl-Token: <private-token>` on all endpoints.
 
 ```sh
 curl -H "X-ActionCtrl-Token: $ACTIONCTRL_TOKEN" \
@@ -41,12 +42,19 @@ curl -X POST -H "Content-Type: application/json" \
   -H "X-ActionCtrl-Token: $ACTIONCTRL_TOKEN" \
   --data '{"button":"left","request_id":"mac-001"}' \
   http://<device-address>/remote/api/v1/tap
+
+curl -X POST -H "Content-Type: application/json" \
+  -H "X-ActionCtrl-Token: $ACTIONCTRL_TOKEN" \
+  --data '{"queue_capacity":16}' \
+  http://<device-address>/remote/api/v1/settings
 ```
 
 `tap` returns `202` when queued. It does not wait for the foreground app to
 finish the action. A request ID is remembered for the most recent 64 accepted
 requests; repeating one returns `202` with `duplicate: true` and does not tap
-again. The waiting queue holds up to 16 commands.
+again. The waiting queue capacity defaults to 16 and can be changed from 1 to
+32 with the authenticated settings endpoint; the chosen value is persisted in
+`/sd/data/actionctrlhttp/config.json`.
 
 The Service publishes a 120 ms press, releases the button, and enforces at
 least 500 ms between press starts. It uses a nonblocking 20 ms timer. The plan
@@ -67,5 +75,5 @@ app manager relaunches a stopped persistent Service after about two seconds.
 To switch to another `ble-main` publisher for an extended period, disable
 `autostart_service` in the installed manifest or uninstall ActionCtrlHTTP.
 
-The HTTP server is shared with other apps. This Service registers only its two
+The HTTP server is shared with other apps. This Service registers only its
 routes and unregisters those routes on stop; it never stops the shared server.

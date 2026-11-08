@@ -81,11 +81,27 @@ Launcher 和 2048 每 40 ms 读取一次 `controller.state("ble-main")`，并根
   "ok": true,
   "source": "ble-main",
   "buttons": 0,
-  "queue_length": 0
+  "queue_length": 0,
+  "queue_capacity": 16
 }
 ```
 
 用于检查 Service 运行状态、当前按钮状态和待处理队列长度。
+
+### 3.3 队列容量设置
+
+`POST /remote/api/v1/settings`
+
+请求：
+
+```json
+{"queue_capacity": 16}
+```
+
+容量范围为 1–32。Service 将值保存到 `/sd/data/actionctrlhttp/config.json`，
+通过临时文件和备份文件校验后替换；成功响应包含 `persisted: true` 和
+实际保存的 `queue_capacity`。容量调低时，已接受的队列项继续执行，新请求
+按新容量限制。
 
 ### 3.3 错误处理
 
@@ -94,7 +110,9 @@ Launcher 和 2048 每 40 ms 读取一次 `controller.state("ble-main")`，并根
 - 409：`ble-main` 已被其他 Service 占用
 - 429：指令队列已满
 
-使用可配置的 `X-ActionCtrl-Token` 请求头进行简单认证，避免局域网内未经授权的控制。
+所有端点都使用可配置的 `X-ActionCtrl-Token` 请求头进行简单认证。
+
+队列容量默认 16，允许值为 1–32；设置端点将其持久化到 `/sd/data/actionctrlhttp/config.json`。
 
 ## 4. 按键状态机
 
@@ -115,7 +133,7 @@ Service 内部执行：
 
 - 使用 `tmr` 非阻塞定时器，不使用 busy-wait。
 - 默认每次只按一个按钮。
-- 使用 FIFO 队列，队列容量暂定 16。
+- 使用 FIFO 队列，默认容量 16，可在 1–32 之间通过认证设置接口调整，并持久化到设备配置。
 - 支持 `request_id` 去重，避免 HTTP 重试导致重复操作。
 - 退出或异常时确保所有按钮释放。
 - 不需要自定义 `pressed/released` 字段，由 controller API 自动计算。
