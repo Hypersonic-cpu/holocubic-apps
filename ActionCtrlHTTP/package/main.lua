@@ -14,7 +14,9 @@ local QUEUE_CAPACITY_MIN = 1
 local QUEUE_CAPACITY_MAX = 32
 local DEDUPE_CAPACITY = 64
 local ENGINE_TICK_MS = 20
-local PRESS_MS = 120
+local DEFAULT_HOLD_MS = 120
+local MIN_HOLD_MS = 120
+local MAX_HOLD_MS = 5000
 local MIN_RELEASE_MS = 80
 local TAP_INTERVAL_MS = 500
 
@@ -37,7 +39,7 @@ if previous and type(previous.stop) == "function" then
 end
 
 local APP = {
-  version = "0.2.0",
+  version = "0.3.0",
   routes = {},
   queue = {},
   queue_head = 1,
@@ -52,6 +54,7 @@ local APP = {
   phase = "idle",
   active_request_id = nil,
   active_button = nil,
+  active_hold_ms = nil,
   press_started_ms = nil,
   last_completed_request_id = nil,
   last_error = nil,
@@ -488,6 +491,7 @@ function APP.stop(reason)
   APP.phase = "idle"
   APP.active_request_id = nil
   APP.active_button = nil
+  APP.active_hold_ms = nil
   queue_clear()
   unregister_routes()
   if rawget(_G, SERVICE_KEY) == APP then rawset(_G, SERVICE_KEY, nil) end
@@ -499,6 +503,7 @@ local function fail_engine(reason)
   queue_clear()
   APP.active_request_id = nil
   APP.active_button = nil
+  APP.active_hold_ms = nil
   APP.phase = "fault"
   if APP.owns_source then
     local released = publish_state(0, true)
@@ -526,6 +531,7 @@ local function start_next_command(now)
   APP.phase = "pressed"
   APP.active_request_id = command.request_id
   APP.active_button = command.button
+  APP.active_hold_ms = command.hold_ms
   APP.press_started_ms = now
   APP.last_error = nil
 end
@@ -538,16 +544,18 @@ local function engine_tick()
   if APP.phase == "fault" then return end
 
   local now = now_ms()
-  if APP.phase == "pressed" and elapsed_ms(APP.press_started_ms, now) >= PRESS_MS then
+  local hold_ms = APP.active_hold_ms or DEFAULT_HOLD_MS
+  if APP.phase == "pressed" and elapsed_ms(APP.press_started_ms, now) >= hold_ms then
     local released, err = publish_state(0, true)
     if not released then fail_engine(err); return end
     APP.phase = "release_wait"
   end
 
-  if APP.phase == "release_wait" and elapsed_ms(APP.press_started_ms, now) >= math.max(TAP_INTERVAL_MS, PRESS_MS + MIN_RELEASE_MS) then
+  if APP.phase == "release_wait" and elapsed_ms(APP.press_started_ms, now) >= math.max(TAP_INTERVAL_MS, hold_ms + MIN_RELEASE_MS) then
     APP.last_completed_request_id = APP.active_request_id
     APP.active_request_id = nil
     APP.active_button = nil
+    APP.active_hold_ms = nil
     APP.phase = "idle"
   end
 
@@ -588,7 +596,13 @@ local function decode_command(raw)
       return nil, "invalid_request_id"
     end
   end
-  return { button = button, request_id = request_id }
+  local hold_ms = value.hold_ms
+  if hold_ms == nil then hold_ms = DEFAULT_HOLD_MS end
+  if type(hold_ms) ~= "number" or hold_ms ~= math.floor(hold_ms)
+      or hold_ms < MIN_HOLD_MS or hold_ms > MAX_HOLD_MS then
+    return nil, "invalid_hold_ms"
+  end
+  return { button = button, request_id = request_id, hold_ms = hold_ms }
 end
 
 local function status_handler(req)
@@ -598,6 +612,7 @@ local function status_handler(req)
   local busy = current_source_busy()
   local status = {
     ok = true,
+    version = APP.version,
     source = SOURCE,
     buttons = APP.buttons,
     queue_length = queue_length(),
@@ -609,6 +624,7 @@ local function status_handler(req)
     last_error = APP.last_error,
   }
   if APP.active_request_id then status.active_request_id = APP.active_request_id end
+  if APP.active_hold_ms then status.active_hold_ms = APP.active_hold_ms end
   if APP.last_completed_request_id then status.last_completed_request_id = APP.last_completed_request_id end
   return response("200 OK", status)
 end
@@ -665,6 +681,7 @@ local function tap_handler(req)
     ok = true,
     request_id = command.request_id,
     queued = true,
+    hold_ms = command.hold_ms,
   })
 end
 

@@ -45,6 +45,11 @@ curl -X POST -H "Content-Type: application/json" \
 
 curl -X POST -H "Content-Type: application/json" \
   -H "X-ActionCtrl-Token: $ACTIONCTRL_TOKEN" \
+  --data '{"button":"home","hold_ms":1000}' \
+  http://<device-address>/remote/api/v1/tap
+
+curl -X POST -H "Content-Type: application/json" \
+  -H "X-ActionCtrl-Token: $ACTIONCTRL_TOKEN" \
   --data '{"queue_capacity":16}' \
   http://<device-address>/remote/api/v1/settings
 ```
@@ -56,10 +61,13 @@ again. The waiting queue capacity defaults to 16 and can be changed from 1 to
 32 with the authenticated settings endpoint; the chosen value is persisted in
 `/sd/data/actionctrlhttp/config.json`.
 
-The Service publishes a 120 ms press, releases the button, and enforces at
-least 500 ms between press starts. It uses a nonblocking 20 ms timer. The plan
-specified a 400 ms minimum; live Launcher testing showed its 360 ms slide,
-completion timer, and 40 ms input polling can drop a tap at that boundary.
+`hold_ms` is optional. When omitted, a tap holds the button for 120 ms. Accepted
+values are integer milliseconds from 120 through 5000. The Service releases the
+button automatically, then waits long enough that the next press starts no
+earlier than `max(500, hold_ms + 80)` ms after this press began. It uses a
+nonblocking 20 ms timer. The plan specified a 400 ms minimum; live Launcher
+testing showed its 360 ms slide, completion timer, and 40 ms input polling can
+drop a tap at that boundary.
 
 ## `ble-main` ownership
 

@@ -38,11 +38,13 @@ Launcher 和 2048 每 40 ms 读取一次 `controller.state("ble-main")`，并根
 ```json
 {
   "button": "left",
+  "hold_ms": 120,
   "request_id": "mac-001"
 }
 ```
 
-`request_id` 可选，用于请求去重。
+`request_id` 可选，用于请求去重。`hold_ms` 可选，默认 120 ms；有效值为
+120–5000 的整数。请求被接受后，Service 会按指定时长按住，再自动释放。
 
 正常响应：HTTP 202 Accepted
 
@@ -50,7 +52,8 @@ Launcher 和 2048 每 40 ms 读取一次 `controller.state("ble-main")`，并根
 {
   "ok": true,
   "request_id": "mac-001",
-  "queued": true
+  "queued": true,
+  "hold_ms": 120
 }
 ```
 
@@ -68,7 +71,7 @@ Launcher 和 2048 每 40 ms 读取一次 `controller.state("ble-main")`，并根
 | b | 0x0020 | 应用内返回（视应用支持） |
 | select | 0x1000 | 2048 退出 |
 | menu | 0x2000 | 确认 / 启动 |
-| home | 0x8000 | 2048 退出 |
+| home | 0x8000 | Home；应用可定义短按和长按行为 |
 
 ### 3.2 状态查询
 
@@ -79,6 +82,7 @@ Launcher 和 2048 每 40 ms 读取一次 `controller.state("ble-main")`，并根
 ```json
 {
   "ok": true,
+  "version": "0.3.0",
   "source": "ble-main",
   "buttons": 0,
   "queue_length": 0,
@@ -103,7 +107,7 @@ Launcher 和 2048 每 40 ms 读取一次 `controller.state("ble-main")`，并根
 实际保存的 `queue_capacity`。容量调低时，已接受的队列项继续执行，新请求
 按新容量限制。
 
-### 3.3 错误处理
+### 3.4 错误处理
 
 - 400：非法按钮或参数
 - 401：认证失败
@@ -122,9 +126,9 @@ Service 内部执行：
 
 1. 从 FIFO 队列获取指令。
 2. 发布 `buttons = 指定 bitmask`，模拟 Press。
-3. 保持 120 ms。
+3. 保持 `hold_ms` 指定时长，省略时保持 120 ms。
 4. 发布 `buttons = 0`，模拟 Release。
-5. 保证至少 80 ms 松开时间。
+5. 等到距本次按下至少 `max(500, hold_ms + 80)` ms 后，再处理下一条指令。
 6. 处理下一条指令。
 
 由于 Launcher 切换动画为 360 ms，结束定时器另有 30 ms，且按键每 40 ms 轮询一次，实测 400 ms 边界可能吞掉连续点击中的第二个方向键。当前实现将相邻按键启动间隔提高到 500 ms；这高于原计划的 400 ms 下限，也覆盖 2048 约 280 ms 的滑动动画。
@@ -133,11 +137,12 @@ Service 内部执行：
 
 - 使用 `tmr` 非阻塞定时器，不使用 busy-wait。
 - 默认每次只按一个按钮。
+- 每条 FIFO 命令单独保存 `hold_ms`，有效范围 120–5000 ms；超范围或非整数返回 400。
+- 按下时长结束后总会自动释放，不要求客户端另发 release 请求。
 - 使用 FIFO 队列，默认容量 16，可在 1–32 之间通过认证设置接口调整，并持久化到设备配置。
 - 支持 `request_id` 去重，避免 HTTP 重试导致重复操作。
 - 退出或异常时确保所有按钮释放。
 - 不需要自定义 `pressed/released` 字段，由 controller API 自动计算。
-- 第一版不实现长按、持续按住或组合键。
 
 ## 5. 实现步骤
 
@@ -182,8 +187,9 @@ Service 内部执行：
 4. 进入 2048，依次发送四方向指令。
 5. 连续发送相同方向，验证每次均产生独立按键事件。
 6. 使用 `home` 返回 Launcher。
-7. 测试错误请求、队列满、重复请求及 Service 重启。
-8. 验证前台应用运行期间 HTTP 接口持续可用。
+7. 在支持 Home 长按的应用中发送 `{"button":"home","hold_ms":1000}`，确认长按行为和自动释放。
+8. 测试错误请求、队列满、重复请求及 Service 重启。
+9. 验证前台应用运行期间 HTTP 接口持续可用。
 
 ## 6. 验收标准
 
@@ -193,8 +199,9 @@ Service 内部执行：
 - 连续相同按键不会丢失上升沿。
 - Service 不阻塞前台应用，也不会影响已有 HTTP 服务。
 - Service 可自动启动、正常停止并释放资源。
+- `home` 长按请求能按指定时长执行，且后续队列项遵守松开间隔。
 
-**不在第一版范围内：** macOS GUI、长按/组合键、游戏操作完成 ACK、游戏状态读取及通用应用按键映射适配。
+**不在范围内：** 游戏操作完成 ACK、游戏状态读取及通用应用按键映射适配。
 
 ## 7. 实现与真机验证记录
 
@@ -203,5 +210,7 @@ Service 内部执行：
 - Firmware 1.213 真机验证：有效 token 的状态请求 200；缺失/错误 token 为 401；非法 JSON/按钮为 400；超长请求体为 413；队列满返回 429，17 条接受后第 18 条被拒绝，队列排空且按钮归零。
 - 真机操作验证：Launcher 的 A 启动 2048；2048 的上、下、左、右及重复左键都被接受，Home 返回 Launcher；运行 2048 时 HTTP Service 仍可用。
 - Service 重启 API 返回成功；重启后路由短暂返回一次 404，稍后状态路由恢复 200，队列为空且按钮归零。
+- v0.3.0 为每条 tap 增加可选 `hold_ms`（默认 120，范围 120–5000）；下一条按键至少在 `max(500, hold_ms + 80)` ms 后开始。Mac 应用 Escape 按住至少 800 ms 后发送 1000 ms Home。
+- Firmware 1.213 上用 Mac Escape 按住 900 ms 做了 Launcher 端到端检查；服务完成请求后队列为空、按钮归零。因 QQ 音乐未在前台，本次未实测 QQ 音乐退出行为。
 - 安全限制：HTTP 不加密；设备 DevTools 的 SD 文件读取接口未认证。因此 token 仅作为可信 WLAN 上的请求门槛，不能防止同网段客户端读取 token 或监听请求。
 
