@@ -31,14 +31,18 @@ characteristics, finds the Command CCCD, subscribes to notifications, and authen
 Reconnect attempts use exponential backoff from 1 to 30 seconds. BLE messages use the
 fragment format in [`docs/BLE_CONTROL_PROTOCOL.md`](../docs/BLE_CONTROL_PROTOCOL.md).
 
-Only after authentication does the Service forward `tap` and `status` messages to
-`actionctrlhttp-command`. It waits for an actual IPC `result` from ActionCtrlHTTP before
-notifying the Mac. An IPC send acceptance by itself is not reported as a successful tap.
+Authentication is a two-way handshake: the Mac replies `auth_ok`, then this Service writes
+`auth_confirm` and waits for the Write With Response completion before entering Ready. Only
+then does it forward `tap`, `status`, and `settings` messages to `actionctrlhttp-command`. It
+waits for an actual IPC `result` from ActionCtrlHTTP before notifying the Mac. Neither a queued
+BLE notification nor an IPC send acceptance is reported as a completed authentication or tap.
 
 ## Diagnostics and recovery
 
-Serial logs use the `[ActionCtrlBLE]` prefix and omit token contents. A successful session
-logs `BLE session authorized`. Repeated `required_lua_ble_api_unavailable`,
+Serial logs use the `[ActionCtrlBLE]` prefix and omit token contents. A confirmed session logs
+`BLE session authorized and confirmed`; disconnect logs include the current connection handle
+and state but omit the peer address. Stale disconnect IRQs are ignored. Repeated
+`required_lua_ble_api_unavailable`,
 `ble_irq_failed`, or characteristic discovery errors indicate an onboard BLE API or GATT
 compatibility issue; do not work around those errors by modifying firmware silently.
 

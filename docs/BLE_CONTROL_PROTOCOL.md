@@ -26,8 +26,18 @@ The HoloCubic sends this message over Response after notification subscription:
 {"version":1,"type":"auth","request_id":"ble-auth-1","token":"clocteck-ble-debug-2026"}
 ```
 
-The Mac replies with `auth_ok` or `auth_failed`. Only an authenticated session may send
-`tap`, `status`, or `settings`; a new BLE connection must authenticate again.
+The Mac replies with `auth_ok` or `auth_failed`. `auth_ok` means the token matched, but is not
+yet the Ready state. The HoloCubic confirms receipt with the same request ID:
+
+```json
+{"version":1,"type":"auth_confirm","request_id":"ble-auth-1"}
+```
+
+The Mac enters Ready only after receiving `auth_confirm`; the HoloCubic enters Ready after the
+confirmation write completes. Only then may the session send `tap`, `status`, or `settings`.
+A new BLE connection must authenticate again. This final confirmation prevents the Mac UI from
+showing an authorized state merely because CoreBluetooth accepted an `auth_ok` notification into
+its transmit queue.
 
 ```json
 {"version":1,"type":"auth_ok","request_id":"ble-auth-1"}

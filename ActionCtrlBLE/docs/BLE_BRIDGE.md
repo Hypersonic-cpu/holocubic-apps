@@ -170,9 +170,10 @@ ACK 至少包含：
 2. Clocteck 连接并订阅 Command。
 3. Clocteck 通过 Response Characteristic 将 `auth` 消息发给 Mac。
 4. Mac 比较接收到的 Token 与本地配置。
-5. 一致时向该 Central 发送 `auth_ok`。
-6. Clocteck 进入 Authorized 状态。
-7. 此后才允许 `tap`、`status` 等控制消息。
+5. 一致时向该 Central 发送 `auth_ok`，Mac 仍保持 Authorizing。
+6. Clocteck 收到 `auth_ok` 后，以相同 request ID 写回 `auth_confirm`。
+7. Mac 收到当前 Central 的 `auth_confirm` 后才进入 Ready；Clocteck 在确认写完成后进入 Ready。
+8. 此后才允许 `tap`、`status` 等控制消息。
 
 这是调试级共享口令校验，不声称提供抗窃听、抗重放或真正的双向加密身份认证。
 
@@ -337,7 +338,7 @@ Transport/
 - 不修改既有 HTTP Token。
 - 不修改 Clocteck 的 `/sd/apps/settings.json`。
 
-连接成功不等于认证成功。只有收到 `auth_ok` 且双方状态一致后，Mac 才能向该设备发送控制命令。
+连接成功不等于认证成功。只有完成 `auth_ok` / `auth_confirm` 双向握手后，Mac 才能向该设备发送控制命令。
 
 失败情况需要有独立状态，例如 `Auth Failed`。
 
@@ -550,6 +551,8 @@ Clocteck：
 - Mac 出现后连接。
 - GATT 连接中断后清理旧连接状态。
 - 重新扫描、发现、订阅、认证。
+- 收到 `auth_ok` 后确认写成功；无确认时在认证超时后重连。
+- 忽略不匹配当前连接句柄的旧 disconnect IRQ，避免误重置有效会话。
 - 授权成功后恢复 Ready。
 - 停止 Service 时注销 IRQ 并释放 BLE 资源。
 - 不能因为 BLE 初始化失败而影响 Wi-Fi 和 HTTP。
@@ -566,6 +569,8 @@ Mac：
 - 不依赖 Clocteck 的 IP 地址或 mDNS 来建立 BLE。
 
 认证信息在重连后需重新验证，不能仅凭上一次连接成功就默认当前连接授权。
+
+断开处理必须关联当前 BLE connection handle。服务已清理的连接若稍后才收到 disconnect IRQ，应忽略它，避免重复清理并不必要地延长退避时间。
 
 建议设置合理的连接、认证、分片、IPC 和回复超时；实际参数经真机测试后确定并记录。
 

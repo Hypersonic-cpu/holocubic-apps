@@ -9,4 +9,4 @@ autostart_service = true
 description = Connect to MacCtrlHTTP over BLE and forward authenticated button commands to ActionCtrlHTTP.
 description_zh_cn = 通过 BLE 连接 MacCtrlHTTP，并将认证后的按键命令转发给 ActionCtrlHTTP。
 description_en = Connect to MacCtrlHTTP over BLE and forward authenticated button commands.
-version = 0.1.1
+version = 0.1.3

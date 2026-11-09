@@ -17,7 +17,10 @@ local SCAN_DURATION_MS = 30000
 local CONNECT_TIMEOUT_MS = 7000
 local AUTH_TIMEOUT_MS = 10000
 local IPC_TIMEOUT_MS = 5000
-local TICK_MS = 500
+local TICK_MS = 100
+local FAST_RECONNECT_DELAY_MS = 100
+local FAST_RECONNECT_MAX_ATTEMPTS = 5
+local CACHED_PEER_TTL_MS = 60000
 local RETRY_MIN_MS = 1000
 local RETRY_MAX_MS = 30000
 local FRAGMENT_TIMEOUT_MS = 5000
@@ -46,7 +49,7 @@ if previous and type(previous.stop) == "function" then
 end
 
 local APP = {
-  version = "0.1.1",
+  version = "0.1.3",
   state = "disabled",
   config = nil,
   config_error = nil,
@@ -55,6 +58,11 @@ local APP = {
   ipc_listening = false,
   timer = nil,
   conn = nil,
+  last_peer = nil,
+  fast_reconnect_pending = false,
+  fast_reconnect_active = false,
+  fast_reconnect_attempts = 0,
+  last_disconnect_ms = nil,
   addr = nil,
   addr_type = nil,
   service_start = nil,
@@ -252,7 +260,20 @@ end
 local function schedule_scan_retry(reason)
   if APP.stopped or not APP.config or not APP.config.enabled or not APP.config.auto_connect then return end
   APP.state = "disconnected"
+  APP.fast_reconnect_pending = false
   clear_link_state()
+  local peer = APP.last_peer
+  if APP.fast_reconnect_active and peer
+      and APP.fast_reconnect_attempts < FAST_RECONNECT_MAX_ATTEMPTS
+      and elapsed_ms(peer.authorized_ms, now_ms()) < CACHED_PEER_TTL_MS then
+    APP.fast_reconnect_pending = true
+    APP.next_scan_ms = now_ms() + FAST_RECONNECT_DELAY_MS
+    log("direct reconnect " .. tostring(APP.fast_reconnect_attempts + 1)
+        .. "/" .. tostring(FAST_RECONNECT_MAX_ATTEMPTS)
+        .. " in " .. tostring(FAST_RECONNECT_DELAY_MS) .. " ms: " .. tostring(reason))
+    return
+  end
+  APP.fast_reconnect_active = false
   APP.next_scan_ms = now_ms() + APP.retry_ms
   log("will rescan in " .. tostring(APP.retry_ms) .. " ms: " .. tostring(reason))
   APP.retry_ms = math.min(APP.retry_ms * 2, RETRY_MAX_MS)
@@ -264,6 +285,10 @@ local function fail_link(reason)
     pcall(BLE.gap_disconnect, APP.conn)
   end
   schedule_scan_retry(reason)
+end
+
+local function disconnect_event_handle(data)
+  return tonumber(get_field(data, "conn_handle") or get_field(data, "conn") or get_field(data, 1))
 end
 
 local function scan()
@@ -278,7 +303,7 @@ local function scan()
     log(APP.config_error)
     return
   end
-  local ok, result, err = pcall(BLE.gap_scan, SCAN_DURATION_MS)
+  local ok, result, err = pcall(BLE.gap_scan, SCAN_DURATION_MS, 60000, 30000, true)
   if not ok or result == false or (result == nil and err ~= nil) then
     APP.state = "error"
     APP.config_error = "ble_scan_failed: " .. tostring(err or result)
@@ -289,6 +314,7 @@ local function scan()
   end
   APP.state = "scanning"
   APP.scan_deadline_ms = now_ms() + SCAN_DURATION_MS + 1000
+  log("BLE scan started")
 end
 
 local function stop_scan()
@@ -470,12 +496,31 @@ local function handle_ble_message(message)
   end
   if APP.state == "authorizing" then
     if message.type == "auth_ok" and message.request_id == APP.auth_request_id then
-      APP.state = "ready"
-      APP.auth_deadline_ms = nil
-      APP.auth_request_id = nil
-      APP.retry_ms = RETRY_MIN_MS
-      APP.next_scan_ms = 0
-      log("BLE session authorized")
+      local request_id = APP.auth_request_id
+      log("Mac accepted BLE token; confirming authentication")
+      local sent, err = enqueue_write({
+        version = 1,
+        type = "auth_confirm",
+        request_id = request_id,
+      }, function()
+        if APP.stopped or not APP.conn or APP.state ~= "authorizing"
+            or APP.auth_request_id ~= request_id then return end
+        APP.last_peer = { addr = APP.addr, addr_type = APP.addr_type, authorized_ms = now_ms() }
+        APP.fast_reconnect_pending = false
+        APP.fast_reconnect_active = false
+        APP.fast_reconnect_attempts = 0
+        APP.state = "ready"
+        APP.auth_deadline_ms = nil
+        APP.auth_request_id = nil
+        APP.retry_ms = RETRY_MIN_MS
+        APP.next_scan_ms = 0
+        log("BLE session authorized and confirmed")
+        if APP.last_disconnect_ms then
+          log("reconnected in " .. tostring(elapsed_ms(APP.last_disconnect_ms, now_ms())) .. " ms")
+          APP.last_disconnect_ms = nil
+        end
+      end)
+      if not sent then fail_link("auth_confirmation_write_failed: " .. tostring(err)) end
     elseif message.type == "auth_failed" then
       log("Mac rejected BLE authentication (token omitted)")
       fail_link("authentication_failed")
@@ -661,6 +706,8 @@ local function on_irq(event, data)
     if APP.state == "scanning" then schedule_scan_retry("scan_complete") end
   elseif event == IRQ_PERIPHERAL_CONNECT then
     local status = tonumber(get_field(data, "status")) or 0
+    log("peripheral connect irq status=" .. tostring(status)
+        .. " conn=" .. tostring(get_field(data, "conn_handle")))
     if status ~= 0 then schedule_scan_retry("connect_status_" .. tostring(status)); return end
     APP.conn = tonumber(get_field(data, "conn_handle"))
     if not APP.conn then fail_link("connection_handle_missing"); return end
@@ -675,6 +722,27 @@ local function on_irq(event, data)
       fail_link("service_discovery_failed: " .. tostring(err or result))
     end
   elseif event == IRQ_PERIPHERAL_DISCONNECT then
+    local event_conn = disconnect_event_handle(data)
+    if not APP.conn then
+      log("ignored stale peripheral disconnect event")
+      return
+    end
+    if event_conn and event_conn ~= APP.conn then
+      log("ignored unrelated peripheral disconnect event")
+      return
+    end
+    log("peripheral disconnect irq conn=" .. tostring(event_conn)
+        .. " status=" .. tostring(get_field(data, "status"))
+        .. " active_conn=" .. tostring(APP.conn)
+        .. " state=" .. tostring(APP.state))
+    local peer = APP.last_peer
+    local reconnect = APP.state == "ready" and peer
+        and elapsed_ms(peer.authorized_ms, now_ms()) < CACHED_PEER_TTL_MS
+    if reconnect then
+      APP.fast_reconnect_active = true
+      APP.fast_reconnect_attempts = 0
+      APP.last_disconnect_ms = now_ms()
+    end
     schedule_scan_retry("peripheral_disconnected")
   elseif event == IRQ_MTU_EXCHANGED then
     local mtu = tonumber(get_field(data, "mtu"))
@@ -796,7 +864,16 @@ local function timer_tick()
       end
     end
   end
-  if APP.state == "disconnected" and now >= APP.next_scan_ms then scan() end
+  if APP.state == "disconnected" and now >= APP.next_scan_ms then
+    if APP.fast_reconnect_pending and APP.last_peer then
+      local peer = APP.last_peer
+      APP.fast_reconnect_pending = false
+      APP.fast_reconnect_attempts = APP.fast_reconnect_attempts + 1
+      start_connect(peer.addr_type, peer.addr)
+    else
+      scan()
+    end
+  end
 end
 
 function APP.stop(reason)
@@ -857,6 +934,14 @@ if not active_ok or active_result == false or (active_result == nil and active_e
   APP.config_error = "ble_active_failed: " .. tostring(active_error or active_result)
   log(APP.config_error)
   return APP
+end
+-- 247-byte ATT MTU keeps notification payloads within the Host's 244-byte
+-- event limit, while avoiding the many auth fragments of the default MTU 32.
+if type(BLE.config) == "function" then
+  local ok, result, err = pcall(BLE.config, { mtu = 247 })
+  if not ok or result == false or (result == nil and err ~= nil) then
+    log("preferred MTU unavailable; retaining default: " .. tostring(err or result))
+  end
 end
 local irq_ok, irq_result, irq_error = pcall(BLE.irq, on_irq)
 if not irq_ok or irq_result == false or (irq_result == nil and irq_error ~= nil) then
