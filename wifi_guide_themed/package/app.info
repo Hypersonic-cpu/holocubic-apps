@@ -1,10 +1,10 @@
-name = Clocteck WiFi Setup
-name_zh = Clocteck 主题配网
-name_zh_cn = Clocteck 主题配网
-name_zh_tw = Clocteck 主題配網
-name_zh_hant = Clocteck 主題配網
-name_en = Clocteck WiFi Setup
-name_ja = Clocteck WiFi セットアップ
+name = WiFi Setup
+name_zh = WiFi 配网
+name_zh_cn = WiFi 配网
+name_zh_tw = WiFi 配網
+name_zh_hant = WiFi 配網
+name_en = WiFi Setup
+name_ja = WiFi 設定
 version = 1.0.0
 kind = app
 category = tool

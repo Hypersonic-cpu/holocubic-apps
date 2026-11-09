@@ -1,6 +1,9 @@
 local SCREEN_W = 320
 local SCREEN_H = 240
 local SETTINGS_PATH = "/sd/apps/settings.json"
+local CONFIG_PATH = "/sd/apps/wifi_guide_themed/config.json"
+local DEFAULT_GREETING_DAY = "Bonjour, B-cyt"
+local DEFAULT_GREETING_NIGHT = "Bonsoir, B-cyt"
 local SETUP_SSID = "--"
 local SETUP_PORTAL = "192.168.18.1"
 local DEVICE_HOST = "clocteck-cubic.local"
@@ -13,6 +16,8 @@ lv_obj_clean(root)
 local UI = { setup = {}, success = {}, serial = {} }
 local STATE = {
   poll_timer = nil,
+  intro_timer = nil,
+  intro_active = false,
   font_handles = {},
   language = "en",
   connected = false,
@@ -221,6 +226,50 @@ local function read_settings()
   if not codec or not codec.decode then return {} end
   local doc = safe_call(function() return codec.decode(raw) end)
   return type(doc) == "table" and doc or {}
+end
+
+local function device_local_hour()
+  local settings = read_settings()
+  local timezone = tostring(settings.timezone or "CST-8")
+  local time_api = rawget(_G, "time")
+  if time_api and time_api.settimezone then
+    safe_call(function() time_api.settimezone(timezone) end)
+  end
+
+  if time_api and time_api.getlocal then
+    local value = safe_call(function() return time_api.getlocal() end)
+    local year = type(value) == "table" and tonumber(value.year) or nil
+    local hour = type(value) == "table" and tonumber(value.hour) or nil
+    if year and year >= 2024 and hour and hour >= 0 and hour < 24 then
+      return math.floor(hour)
+    end
+  end
+
+  if os and os.date then
+    local value = safe_call(function() return os.date("*t") end)
+    local year = type(value) == "table" and tonumber(value.year) or nil
+    local hour = type(value) == "table" and tonumber(value.hour) or nil
+    if year and year >= 2024 and hour and hour >= 0 and hour < 24 then
+      return math.floor(hour)
+    end
+  end
+  return nil
+end
+
+local function configured_greeting()
+  local raw = file and file.getcontents and safe_call(function() return file.getcontents(CONFIG_PATH) end)
+  local config = json_decode(raw) or {}
+  local hour = device_local_hour()
+  local night = hour ~= nil and (hour >= 18 or hour < 6)
+  local key = night and "greeting_night" or "greeting_day"
+  local fallback = night and DEFAULT_GREETING_NIGHT or DEFAULT_GREETING_DAY
+  local greeting = config[key]
+  if type(greeting) ~= "string" and not night and type(config.greeting) == "string" then
+    greeting = config.greeting
+  end
+  if type(greeting) ~= "string" then return fallback end
+  greeting = greeting:gsub("^%s+", ""):gsub("%s+$", "")
+  return greeting ~= "" and greeting or fallback
 end
 
 -- Only Simplified Chinese is treated as Chinese. Missing, English,
@@ -1118,6 +1167,7 @@ local function build_ui()
 end
 
 local function show_setup()
+  if STATE.intro_active then return end
   STATE.connected = false
   STATE.screen = "setup"
   update_ap_identity()
@@ -1129,6 +1179,7 @@ local function show_setup()
 end
 
 local function show_success(ip)
+  if STATE.intro_active then return end
   STATE.connected = true
   STATE.screen = "success"
   if looks_like_ip(ip) then STATE.last_ip = ip end
@@ -1144,6 +1195,7 @@ local function show_success(ip)
 end
 
 show_serial = function()
+  if STATE.intro_active then return end
   STATE.screen = "serial"
   set_group_visible(UI.setup, false)
   set_group_visible(UI.success, false)
@@ -1208,6 +1260,8 @@ end
 
 local function leave_app()
   stop_timer("poll_timer")
+  stop_timer("intro_timer")
+  STATE.intro_active = false
   if STATE.uart_scan_timer then pcall(function() STATE.uart_scan_timer:unregister() end) end
   if STATE.uart_connection_timer then pcall(function() STATE.uart_connection_timer:unregister() end) end
   if STATE.uart_wifi_events_registered and wifi and wifi.sta and wifi.sta.on then
@@ -1224,14 +1278,50 @@ local function leave_app()
   if app and app.exit then pcall(function() app.exit() end) end
 end
 
-STATE.language = selected_language()
-init_fonts()
-build_ui()
-show_setup()
-check_state()
+local function start_wifi_ui()
+  STATE.intro_active = false
+  STATE.intro_timer = nil
+  lv_obj_clean(root)
+  UI = { setup = {}, success = {}, serial = {} }
 
-STATE.poll_timer = tmr.create()
-STATE.poll_timer:alarm(1200, tmr.ALARM_AUTO, check_state)
+  local language = selected_language()
+  if language ~= STATE.language then
+    release_fonts()
+    STATE.language = language
+    init_fonts()
+  end
+
+  build_ui()
+  check_state()
+
+  STATE.poll_timer = tmr.create()
+  STATE.poll_timer:alarm(1200, tmr.ALARM_AUTO, check_state)
+end
+
+local function show_greeting()
+  STATE.language = selected_language()
+  init_fonts()
+
+  UI = { setup = {}, success = {}, serial = {}, greeting = {} }
+  UI.greeting.background = make_panel(root, 0, 0, SCREEN_W, SCREEN_H, 0x000000, 255, 0, 0, 0, 0)
+  local greeting = configured_greeting()
+  UI.greeting.message = make_label(root, 10, 102, SCREEN_W - 20, 36,
+    greeting, 0xFFFFFF, FONT_TITLE, LV_TEXT_ALIGN_CENTER)
+  set_dynamic_text(UI.greeting.message, greeting, FONT_TITLE)
+  STATE.screen = "greeting"
+  STATE.intro_active = true
+
+  if not tmr or not tmr.create or not tmr.ALARM_SINGLE then
+    start_wifi_ui()
+    return
+  end
+  STATE.intro_timer = tmr.create()
+  STATE.intro_timer:alarm(3000, tmr.ALARM_SINGLE, function()
+    if STATE.intro_active then start_wifi_ui() end
+  end)
+end
+
+show_greeting()
 
 key.on(key.HOME, function(event_type)
   if event_type == key.SHORT or event_type == key.START then leave_app() end

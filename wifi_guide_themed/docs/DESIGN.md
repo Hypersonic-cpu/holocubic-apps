@@ -12,6 +12,7 @@
 wifi_guide_themed/
 └── package/
     ├── app.info
+    ├── config.json
     ├── main.lua
     ├── main.png
     ├── font/
@@ -22,11 +23,13 @@ wifi_guide_themed/
         └── success.jpg
 ```
 
+启动时先以黑底白字展示 `config.json` 中的问候语，持续 3 秒后进入配网状态。`greeting_day` 默认是 `Bonjour, B-cyt`，`greeting_night` 默认是 `Bonsoir, B-cyt`；按设备本地时间 06:00–17:59 / 18:00–05:59 选择。配置缺失、无效或对应文案为空时使用该时段的默认文本；无法读取有效时间时使用白天文案。
+
 - 复制原 `wifi_guide` 项目作为基础。
 - 修改 `app.info`，确保新旧 App 可以同时安装。
 - 所有新资源路径使用 `/sd/apps/wifi_guide_themed/`。
 - 保持 `/sd/apps/settings.json` 等系统公共路径不变。
-- 不修改 Launcher 默认自启动配置。
+- 按设备设置将 Launcher 自启动 App 指向 `wifi_guide_themed`；不修改 Launcher 或 Firmware 代码。
 
 ## 3. 背景图片要求
 
