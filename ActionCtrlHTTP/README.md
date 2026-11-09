@@ -85,3 +85,11 @@ To switch to another `ble-main` publisher for an extended period, disable
 
 The HTTP server is shared with other apps. This Service registers only its
 routes and unregisters those routes on stop; it never stops the shared server.
+
+## BLE bridge IPC
+
+`ActionCtrlBLE` forwards BLE `tap`, `status`, and queue-capacity setting requests
+over `actionctrlhttp-command`. This Service replies with the correlated result
+on `blebridge-response` only after it has processed the request. BLE uses the
+same queue, deduplication, source ownership, and persistent queue-capacity
+setting as HTTP; it does not create another controller publisher.

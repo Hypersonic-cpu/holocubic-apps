@@ -82,7 +82,7 @@ Launcher 和 2048 每 40 ms 读取一次 `controller.state("ble-main")`，并根
 ```json
 {
   "ok": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "source": "ble-main",
   "buttons": 0,
   "queue_length": 0,

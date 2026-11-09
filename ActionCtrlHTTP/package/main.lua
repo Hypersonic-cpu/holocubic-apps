@@ -5,6 +5,8 @@ local CONFIG_PATH = "/sd/data/actionctrlhttp/config.json"
 local ROUTE_TAP = "/remote/api/v1/tap"
 local ROUTE_STATUS = "/remote/api/v1/status"
 local ROUTE_SETTINGS = "/remote/api/v1/settings"
+local IPC_COMMAND_ENDPOINT = "actionctrlhttp-command"
+local IPC_REPLY_ENDPOINT = "blebridge-response"
 local BODY_LIMIT = 1024
 local TOKEN_MIN_LENGTH = 32
 local TOKEN_MAX_LENGTH = 256
@@ -39,8 +41,9 @@ if previous and type(previous.stop) == "function" then
 end
 
 local APP = {
-  version = "0.3.0",
+  version = "0.4.0",
   routes = {},
+  ipc_listening = false,
   queue = {},
   queue_head = 1,
   queue_tail = 0,
@@ -471,6 +474,14 @@ local function unregister_routes()
   APP.routes = {}
 end
 
+local function stop_ipc()
+  if not APP.ipc_listening then return end
+  if ipc and type(ipc.listen) == "function" then
+    pcall(ipc.listen, IPC_COMMAND_ENDPOINT, nil)
+  end
+  APP.ipc_listening = false
+end
+
 local function stop_timers()
   if APP.engine_timer then
     pcall(function() APP.engine_timer:stop() end)
@@ -494,6 +505,7 @@ function APP.stop(reason)
   APP.active_hold_ms = nil
   queue_clear()
   unregister_routes()
+  stop_ipc()
   if rawget(_G, SERVICE_KEY) == APP then rawset(_G, SERVICE_KEY, nil) end
   log("stopped: " .. tostring(reason or ""))
 end
@@ -605,10 +617,7 @@ local function decode_command(raw)
   return { button = button, request_id = request_id, hold_ms = hold_ms }
 end
 
-local function status_handler(req)
-  if APP.stopped then return response("503 Service Unavailable", { ok = false, error = "service_stopped" }) end
-  local authenticated, auth_response = authenticate(req)
-  if not authenticated then return auth_response end
+local function build_status()
   local busy = current_source_busy()
   local status = {
     ok = true,
@@ -626,23 +635,66 @@ local function status_handler(req)
   if APP.active_request_id then status.active_request_id = APP.active_request_id end
   if APP.active_hold_ms then status.active_hold_ms = APP.active_hold_ms end
   if APP.last_completed_request_id then status.last_completed_request_id = APP.last_completed_request_id end
-  return response("200 OK", status)
+  return status
+end
+
+local function accept_tap(command)
+  if APP.stopped then
+    return false, "503 Service Unavailable", { ok = false, error = "service_stopped" }
+  end
+  if APP.phase == "fault" then
+    return false, "503 Service Unavailable", {
+      ok = false,
+      error = "controller_engine_fault",
+      detail = APP.last_error,
+    }
+  end
+  if not APP.engine_timer then
+    return false, "503 Service Unavailable", { ok = false, error = "timer_unavailable" }
+  end
+
+  if was_seen(command.request_id) then
+    return true, "202 Accepted", {
+      ok = true,
+      request_id = command.request_id,
+      queued = false,
+      duplicate = true,
+    }
+  end
+  if queue_length() >= APP.queue_capacity then
+    return false, "429 Too Many Requests", { ok = false, error = "queue_full", request_id = command.request_id }
+  end
+
+  local acquired, acquire_error, detail = ensure_source()
+  if not acquired then
+    local status = acquire_error == "source_busy" and "409 Conflict" or "503 Service Unavailable"
+    local payload = { ok = false, error = acquire_error }
+    if detail then payload.detail = detail end
+    if command.request_id then payload.request_id = command.request_id end
+    return false, status, payload
+  end
+
+  queue_push(command)
+  remember_request(command.request_id)
+  return true, "202 Accepted", {
+    ok = true,
+    request_id = command.request_id,
+    queued = true,
+    hold_ms = command.hold_ms,
+  }
+end
+
+local function status_handler(req)
+  if APP.stopped then return response("503 Service Unavailable", { ok = false, error = "service_stopped" }) end
+  local authenticated, auth_response = authenticate(req)
+  if not authenticated then return auth_response end
+  return response("200 OK", build_status())
 end
 
 local function tap_handler(req)
   if APP.stopped then return response("503 Service Unavailable", { ok = false, error = "service_stopped" }) end
   local authenticated, auth_response = authenticate(req)
   if not authenticated then return auth_response end
-  if APP.phase == "fault" then
-    return response("503 Service Unavailable", {
-      ok = false,
-      error = "controller_engine_fault",
-      detail = APP.last_error,
-    })
-  end
-  if not APP.engine_timer then
-    return response("503 Service Unavailable", { ok = false, error = "timer_unavailable" })
-  end
 
   local body, body_error = read_request_body(req)
   if not body then
@@ -654,35 +706,123 @@ local function tap_handler(req)
     return response("400 Bad Request", { ok = false, error = command_error })
   end
 
-  if was_seen(command.request_id) then
-    return response("202 Accepted", {
-      ok = true,
-      request_id = command.request_id,
-      queued = false,
-      duplicate = true,
-    })
+  local _, status, payload = accept_tap(command)
+  return response(status, payload)
+end
+
+local HTTP_STATUS_CODES = {
+  ["200 OK"] = 200,
+  ["202 Accepted"] = 202,
+  ["400 Bad Request"] = 400,
+  ["401 Unauthorized"] = 401,
+  ["409 Conflict"] = 409,
+  ["413 Payload Too Large"] = 413,
+  ["429 Too Many Requests"] = 429,
+  ["500 Internal Server Error"] = 500,
+  ["503 Service Unavailable"] = 503,
+}
+
+local function send_ipc_result(reply_to, correlation_id, payload, status)
+  if not ipc or type(ipc.send) ~= "function" then return false end
+  payload = payload or { ok = false, error = "internal_error" }
+  payload.correlation_id = correlation_id
+  payload.http_status = HTTP_STATUS_CODES[status] or 500
+  local encoded, encode_error = json_encode(payload)
+  if not encoded then
+    log("IPC result encode failed: " .. tostring(encode_error))
+    return false
   end
-  if queue_length() >= APP.queue_capacity then
-    return response("429 Too Many Requests", { ok = false, error = "queue_full", request_id = command.request_id })
+  local ok, result, err = pcall(ipc.send, reply_to, "result", encoded)
+  if not ok or result == false or (result == nil and err ~= nil) then
+    log("IPC result delivery failed: " .. tostring(err or result))
+    return false
+  end
+  return true
+end
+
+local save_queue_capacity
+
+local function ipc_handler(topic, raw)
+  if type(raw) ~= "string" or #raw > BODY_LIMIT then return end
+  local decode_ok, request = pcall(JSON.decode, raw)
+  if not decode_ok or type(request) ~= "table" then return end
+  if request.reply_to ~= IPC_REPLY_ENDPOINT then return end
+  local correlation_id = request.correlation_id
+  if type(correlation_id) ~= "string" or #correlation_id == 0 or #correlation_id > REQUEST_ID_MAX_LENGTH then
+    return
   end
 
-  local acquired, acquire_error, detail = ensure_source()
-  if not acquired then
-    local status = acquire_error == "source_busy" and "409 Conflict" or "503 Service Unavailable"
-    local payload = { ok = false, error = acquire_error }
-    if detail then payload.detail = detail end
-    if command.request_id then payload.request_id = command.request_id end
-    return response(status, payload)
+  if topic == "status" then
+    if APP.stopped then
+      send_ipc_result(request.reply_to, correlation_id, { ok = false, error = "service_stopped" }, "503 Service Unavailable")
+      return
+    end
+    send_ipc_result(request.reply_to, correlation_id, build_status(), "200 OK")
+    return
   end
 
-  queue_push(command)
-  remember_request(command.request_id)
-  return response("202 Accepted", {
+  if topic == "settings" then
+    if APP.stopped then
+      send_ipc_result(request.reply_to, correlation_id, { ok = false, error = "service_stopped" }, "503 Service Unavailable")
+      return
+    end
+    local _, status, payload = save_queue_capacity(request.queue_capacity)
+    send_ipc_result(request.reply_to, correlation_id, payload, status)
+    return
+  end
+
+  if topic ~= "tap" then
+    send_ipc_result(request.reply_to, correlation_id, { ok = false, error = "unsupported_ipc_topic" }, "400 Bad Request")
+    return
+  end
+  local command, command_error = decode_command(raw)
+  if not command then
+    send_ipc_result(request.reply_to, correlation_id, { ok = false, error = command_error }, "400 Bad Request")
+    return
+  end
+  local _, status, payload = accept_tap(command)
+  send_ipc_result(request.reply_to, correlation_id, payload, status)
+end
+
+local function start_ipc()
+  if not ipc or type(ipc.listen) ~= "function" then return false, "ipc_listen_unavailable" end
+  local ok, result, err = pcall(ipc.listen, IPC_COMMAND_ENDPOINT, ipc_handler)
+  if not ok or result == false or (result == nil and err ~= nil) then
+    return false, tostring(err or result)
+  end
+  APP.ipc_listening = true
+  return true
+end
+
+save_queue_capacity = function(value)
+  local capacity = valid_queue_capacity(value)
+  if not capacity then
+    return false, "400 Bad Request", {
+      ok = false,
+      error = "invalid_queue_capacity",
+      min = QUEUE_CAPACITY_MIN,
+      max = QUEUE_CAPACITY_MAX,
+    }
+  end
+  local config = {}
+  for key, item in pairs(APP.config or {}) do config[key] = item end
+  config.token = APP.token
+  config.queue_capacity = capacity
+  local saved, save_error = write_config_atomic(config)
+  if not saved then
+    APP.last_error = save_error
+    return false, "500 Internal Server Error", { ok = false, error = "config_write_failed", detail = save_error }
+  end
+
+  APP.config = config
+  APP.queue_capacity = capacity
+  APP.last_error = nil
+  return true, "200 OK", {
     ok = true,
-    request_id = command.request_id,
-    queued = true,
-    hold_ms = command.hold_ms,
-  })
+    queue_capacity = APP.queue_capacity,
+    queue_length = queue_length(),
+    persisted = true,
+  }
 end
 
 local function settings_handler(req)
@@ -702,35 +842,8 @@ local function settings_handler(req)
   if not decode_ok or type(value) ~= "table" then
     return response("400 Bad Request", { ok = false, error = "invalid_json" })
   end
-  local capacity = valid_queue_capacity(value.queue_capacity)
-  if not capacity then
-    return response("400 Bad Request", {
-      ok = false,
-      error = "invalid_queue_capacity",
-      min = QUEUE_CAPACITY_MIN,
-      max = QUEUE_CAPACITY_MAX,
-    })
-  end
-
-  local config = {}
-  for key, item in pairs(APP.config or {}) do config[key] = item end
-  config.token = APP.token
-  config.queue_capacity = capacity
-  local saved, save_error = write_config_atomic(config)
-  if not saved then
-    APP.last_error = save_error
-    return response("500 Internal Server Error", { ok = false, error = "config_write_failed", detail = save_error })
-  end
-
-  APP.config = config
-  APP.queue_capacity = capacity
-  APP.last_error = nil
-  return response("200 OK", {
-    ok = true,
-    queue_capacity = APP.queue_capacity,
-    queue_length = queue_length(),
-    persisted = true,
-  })
+  local _, status, payload = save_queue_capacity(value.queue_capacity)
+  return response(status, payload)
 end
 
 local function register_route(method, path, handler)
@@ -800,6 +913,12 @@ local engine_ok, engine_error = start_engine()
 if not engine_ok then
   APP.last_error = APP.last_error or ("engine_start_failed: " .. tostring(engine_error))
   log(APP.last_error)
+end
+
+local ipc_ok, ipc_error = start_ipc()
+if not ipc_ok then
+  APP.last_error = APP.last_error or ("ipc_start_failed: " .. tostring(ipc_error))
+  log("IPC unavailable: " .. tostring(ipc_error))
 end
 
 if not APP.token then

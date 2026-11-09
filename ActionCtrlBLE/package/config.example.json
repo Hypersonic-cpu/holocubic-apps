@@ -1,0 +1,6 @@
+{
+  "enabled": true,
+  "device_name": "Clocteck",
+  "token": "clocteck-ble-debug-2026",
+  "auto_connect": true
+}

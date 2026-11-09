@@ -9,4 +9,4 @@ autostart_service = true
 description = Control Launcher and compatible apps through authenticated local HTTP taps.
 description_zh_cn = 通过带认证的局域网 HTTP 请求模拟手柄按键。
 description_en = Control compatible apps through authenticated local HTTP taps.
-version = 0.3.0
+version = 0.4.0

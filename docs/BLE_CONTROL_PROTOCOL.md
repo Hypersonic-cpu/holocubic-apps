@@ -27,7 +27,7 @@ The HoloCubic sends this message over Response after notification subscription:
 ```
 
 The Mac replies with `auth_ok` or `auth_failed`. Only an authenticated session may send
-`tap` or `status`; a new BLE connection must authenticate again.
+`tap`, `status`, or `settings`; a new BLE connection must authenticate again.
 
 ```json
 {"version":1,"type":"auth_ok","request_id":"ble-auth-1"}
@@ -58,8 +58,19 @@ Mac status request and device response:
 
 ```json
 {"version":1,"type":"status","request_id":"mac-ble-status-1"}
-{"version":1,"type":"status_result","request_id":"mac-ble-status-1","ok":true,"status":{"version":"0.3.0","source":"ble-main","queue_length":0,"queue_capacity":16,"phase":"idle","source_owned":false,"source_busy":false,"engine_ready":true}}
+{"version":1,"type":"status_result","request_id":"mac-ble-status-1","ok":true,"status":{"version":"0.4.0","source":"ble-main","queue_length":0,"queue_capacity":16,"phase":"idle","source_owned":false,"source_busy":false,"engine_ready":true}}
 ```
+
+The existing queue capacity setting can also be synchronized over BLE without exposing an
+arbitrary HTTP proxy:
+
+```json
+{"version":1,"type":"settings","request_id":"mac-ble-settings-1","queue_capacity":16}
+{"version":1,"type":"settings_result","request_id":"mac-ble-settings-1","ok":true,"queue_capacity":16,"queue_length":0,"persisted":true}
+```
+
+The capacity must be an integer from 1 through 32 and is saved using ActionCtrlHTTP's existing
+atomic configuration update path.
 
 Other error messages use `{"version":1,"type":"error","request_id":"...","error":"..."}`.
 Unknown types, unsupported versions, malformed JSON, oversized messages, and unauthenticated
@@ -106,7 +117,7 @@ the same ID can enqueue at most once.
 
 ## Local IPC contract
 
-ActionCtrlBLE sends JSON on `actionctrlhttp-command` with topic `tap` or `status`, including
+ActionCtrlBLE sends JSON on `actionctrlhttp-command` with topic `tap`, `status`, or `settings`, including
 `reply_to:"blebridge-response"` and a unique `correlation_id`. ActionCtrlHTTP replies to
 that endpoint with topic `result` and the same correlation ID only after processing the
 request. `ipc.send()` success only means that IPC accepted the message for delivery; it is
