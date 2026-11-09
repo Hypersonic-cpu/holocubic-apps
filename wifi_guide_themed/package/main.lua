@@ -76,11 +76,11 @@ local TEXT = {
   en = {
     waiting_eyebrow = "WAITING FOR NETWORK",
     waiting_title = "WiFi setup",
-    waiting_desc = "Connect to the device AP, then open the setup address.",
+    waiting_desc = "Connect to this device hotspot, then open its IP in a browser.",
     hotspot = "AP",
     portal = "IP",
-    step1 = "Join device AP",
-    step2 = "Open setup IP",
+    step1 = "Connect to this device hotspot",
+    step2 = "Open IP in browser",
     ready_eyebrow = "NETWORK READY",
     ready_title = "Setup complete",
     ready_desc = "Open device controls using the address below.",
@@ -103,11 +103,11 @@ local TEXT = {
   zh = {
     waiting_eyebrow = "等待网络连接",
     waiting_title = "等待配网",
-    waiting_desc = "连接设备热点后，在浏览器打开配网地址。",
-    hotspot = "AP",
-    portal = "地址",
-    step1 = "连接设备热点",
-    step2 = "浏览器打开地址",
+    waiting_desc = "连接本设备热点，再在浏览器打开 IP。",
+    hotspot = "热点",
+    portal = "IP",
+    step1 = "连接本设备热点",
+    step2 = "浏览器打开IP",
     ready_eyebrow = "网络已连接",
     ready_title = "配网成功",
     ready_desc = "使用下方地址打开控制页面。",
@@ -473,6 +473,8 @@ end
 
 local function update_ap_identity(wifi_state)
   local ssid = wifi_state and wifi_state.ap_ssid or nil
+  local ap_ip = wifi_state and wifi_state.ap_ip or nil
+  if not looks_like_ip(ap_ip) then ap_ip = wifi_ap_ip() end
   if (type(ssid) ~= "string" or ssid == "") and wifi and wifi.sta and wifi.sta.getmac then
     -- Firmware uses the base/STA MAC suffix, not the AP MAC (which is +1).
     local mac = safe_call(function() return wifi.sta.getmac() end)
@@ -483,6 +485,8 @@ local function update_ap_identity(wifi_state)
     SETUP_SSID = ssid
     set_dynamic_text(UI.setup.hotspot, ssid, field_font())
   end
+  if looks_like_ip(ap_ip) then SETUP_PORTAL = tostring(ap_ip) end
+  if UI.setup.portal then safe_set_text(UI.setup.portal, SETUP_PORTAL) end
 end
 
 local function request_system_rssi(force)
@@ -1001,6 +1005,7 @@ local FIELD_LABEL_X = 22
 local FIELD_LABEL_W = 42
 local FIELD_VALUE_X = 78
 local FIELD_VALUE_W = 119
+local FIELD_LONG_VALUE_W = SCREEN_W - FIELD_VALUE_X - 4
 local FIELD_ROWS = { 89, 118, 147, 176 }
 
 local function build_fallback_rows(group)
@@ -1023,22 +1028,21 @@ local function build_setup_ui()
   local small = field_font()
   add_themed_background(UI.setup, "setup.jpg", t.waiting_title, t.waiting_desc, 0x67E8F9)
   UI.setup.hotspot_label = make_label(root, FIELD_LABEL_X, FIELD_ROWS[1], FIELD_LABEL_W, 16,
-    "AP", 0xAFC2CF, small, LV_TEXT_ALIGN_CENTER)
-  UI.setup.hotspot = make_label(root, FIELD_VALUE_X, FIELD_ROWS[1], FIELD_VALUE_W, 16,
+    t.hotspot, 0xAFC2CF, small, LV_TEXT_ALIGN_CENTER)
+  UI.setup.hotspot = make_label(root, FIELD_VALUE_X, FIELD_ROWS[1], FIELD_LONG_VALUE_W, 16,
     SETUP_SSID, 0x67E8F9, small, LV_TEXT_ALIGN_LEFT)
-  set_label_truncation(UI.setup.hotspot)
   update_ap_identity()
   UI.setup.portal_label = make_label(root, FIELD_LABEL_X, FIELD_ROWS[2], FIELD_LABEL_W, 16,
     t.portal, 0xAFC2CF, small, LV_TEXT_ALIGN_CENTER)
-  UI.setup.portal = make_label(root, FIELD_VALUE_X, FIELD_ROWS[2], FIELD_VALUE_W, 16,
-    SETUP_PORTAL, 0xEAF5FC, LV_FONT_MONTSERRAT_10 or FONT_SMALL, LV_TEXT_ALIGN_LEFT)
+  UI.setup.portal = make_label(root, FIELD_VALUE_X, FIELD_ROWS[2], FIELD_LONG_VALUE_W, 16,
+    SETUP_PORTAL, 0xEAF5FC, small, LV_TEXT_ALIGN_LEFT)
   UI.setup.step1_label = make_label(root, FIELD_LABEL_X, FIELD_ROWS[3], FIELD_LABEL_W, 16,
     STATE.language == "zh" and "步骤1" or "STEP1", 0xAFC2CF, small, LV_TEXT_ALIGN_CENTER)
-  UI.setup.step1 = make_label(root, FIELD_VALUE_X, FIELD_ROWS[3], FIELD_VALUE_W, 16,
+  UI.setup.step1 = make_label(root, FIELD_VALUE_X, FIELD_ROWS[3], FIELD_LONG_VALUE_W, 16,
     t.step1, 0xEAF5FC, small, LV_TEXT_ALIGN_LEFT)
   UI.setup.step2_label = make_label(root, FIELD_LABEL_X, FIELD_ROWS[4], FIELD_LABEL_W, 16,
     STATE.language == "zh" and "步骤2" or "STEP2", 0xAFC2CF, small, LV_TEXT_ALIGN_CENTER)
-  UI.setup.step2 = make_label(root, FIELD_VALUE_X, FIELD_ROWS[4], FIELD_VALUE_W, 16,
+  UI.setup.step2 = make_label(root, FIELD_VALUE_X, FIELD_ROWS[4], FIELD_LONG_VALUE_W, 16,
     t.step2, 0xEAF5FC, small, LV_TEXT_ALIGN_LEFT)
 end
 
